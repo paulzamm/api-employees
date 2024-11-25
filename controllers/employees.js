@@ -1,4 +1,8 @@
 const pool = require('../db');
+const fastCSV = require('fast-csv'); 
+const { parse } = require('fast-csv');
+const fs = require('fs');
+const moment = require('moment');
 
 async function getEmployees(req, res) {
     try {
@@ -272,10 +276,117 @@ async function deleteEmployee(req, res) {
     }
 }
 
+async function exportData(req, res) {
+    try{
+        const client = await pool.connect();
+        const result = await client.query(`SELECT * FROM employees`);
+        client.release();
+
+        const csvStream = fastCSV.format({ headers: true });
+        res.setHeader('Content-Disposition', 'attachment; filename="employees.csv"');
+        res.setHeader('Content-Type', 'text/csv');
+
+        csvStream.pipe(res);
+        result.rows.forEach(row => {
+            csvStream.write(row);
+        });
+        csvStream.end();
+    }catch(error){
+        console.log(error);
+        return res.status(500).json('Error al exportar los datos');
+    }
+}
+
+
+async function importData(req, res) {
+    if (!req.files || !req.files.file) {
+        return res.status(400).json({ message: 'No se subió ningún archivo' });
+    }
+
+    const uploadedFile = req.files.file; 
+    const filePath = `uploads/${uploadedFile.name}`; 
+
+    uploadedFile.mv(filePath, async (err) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).json({ message: 'Error al guardar el archivo' });
+        }
+
+        try {
+            const rows = [];
+            const stream = fs.createReadStream(filePath);
+
+            const parser = stream.pipe(parse({ headers: true }));
+
+            for await (const row of parser) {
+                rows.push(row);
+            }
+
+            const client = await pool.connect();
+
+            for (const row of rows) {
+                let {
+                    employee_id,
+                    first_name,
+                    last_name,
+                    email,
+                    phone_number,
+                    hire_date,
+                    job_id,
+                    salary,
+                    commission_pct,
+                    manager_id,
+                    department_id
+                } = row;
+
+                commission_pct = commission_pct === '' ? null : commission_pct;
+                manager_id = manager_id === '' ? null : manager_id;
+                department_id = department_id === '' ? null : department_id;
+
+
+
+                const formattedHireDate = moment(new Date(hire_date)).format("YYYY-MM-DDTHH:mm:ssZ");
+
+                await client.query(
+                    `INSERT INTO employees 
+                    (employee_id, first_name, last_name, email, phone_number, hire_date, job_id, salary, commission_pct, manager_id, department_id) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (employee_id) DO UPDATE 
+                    SET first_name = EXCLUDED.first_name, 
+                        last_name = EXCLUDED.last_name, 
+                        email = EXCLUDED.email, 
+                        phone_number = EXCLUDED.phone_number, 
+                        hire_date = EXCLUDED.hire_date, 
+                        job_id = EXCLUDED.job_id, 
+                        salary = EXCLUDED.salary, 
+                        commission_pct = EXCLUDED.commission_pct, 
+                        manager_id = EXCLUDED.manager_id, 
+                        department_id = EXCLUDED.department_id`,
+                    [employee_id, first_name, last_name, email, phone_number, formattedHireDate, job_id, salary, commission_pct, manager_id, department_id]
+                );
+            }
+
+            client.release();
+
+            fs.unlinkSync(filePath);
+
+            res.status(200).json({ message: 'Datos importados correctamente' });
+        } catch (error) {
+            console.error(error);
+            fs.unlinkSync(filePath); 
+            res.status(500).json({ message: 'Error al importar los datos' });
+        }
+    });
+}
+
+
+
 module.exports = {
     getEmployees,
     getEmployeesById,
     createEmployee,
     updateEmployee,
-    deleteEmployee 
+    deleteEmployee,
+    exportData,
+    importData
 }
